@@ -1,0 +1,7 @@
+# macOS 默认走系统 screencapture，不需要额外依赖。
+# Windows/Linux 如果没有系统截图命令，可以安装 Pillow 作为截图后端。
+Pillow>=10.0
+
+# 可选但推荐：把邮箱授权码存在 Windows 凭据管理器/macOS 钥匙串，
+# 避免写进 .env 明文文件。
+keyring>=25.0
