@@ -24,8 +24,12 @@ import ssl
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime
 from email.message import EmailMessage
+from email.mime.image import MIMEImage
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Callable
 from urllib import error, parse, request
@@ -232,9 +236,60 @@ def activate_macos_app(config: dict[str, str]) -> None:
         logging.warning("激活 macOS 应用失败：%s", result.stderr.strip() or app_name)
 
 
+def activate_windows_app(config: dict[str, str]) -> None:
+    app_name = config.get("WIN_ACTIVATE_APP_NAME", "").strip()
+    if not app_name:
+        return
+
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+
+    found_hwnds = []
+
+    def callback(hwnd, lparam):
+        if user32.IsWindowVisible(hwnd):
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length > 0:
+                buf = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buf, length + 1)
+                if app_name in buf.value:
+                    found_hwnds.append(hwnd)
+        return True
+
+    WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    user32.EnumWindows(WNDENUMPROC(callback), 0)
+
+    if not found_hwnds:
+        logging.warning("未找到包含 '%s' 的窗口", app_name)
+        return
+
+    logging.info("找到 %d 个窗口，逐个激活", len(found_hwnds))
+
+    for hwnd in found_hwnds:
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)
+            time.sleep(0.3)
+
+        user32.ShowWindow(hwnd, 5)
+        time.sleep(0.2)
+
+        user32.keybd_event(0x12, 0, 0, 0)
+        user32.keybd_event(0x12, 0, 2, 0)
+
+        user32.SetForegroundWindow(hwnd)
+        user32.BringWindowToTop(hwnd)
+        time.sleep(0.2)
+
+    logging.info("已激活窗口：%s", app_name)
+
+
 def maybe_prepare_screen(config: dict[str, str]) -> None:
     if platform.system() == "Darwin":
         activate_macos_app(config)
+    elif platform.system() == "Windows":
+        activate_windows_app(config)
 
     delay = get_float(config, "SCREENSHOT_DELAY_SECONDS", 0.5)
     if delay > 0:
@@ -401,23 +456,31 @@ def send_email(config: dict[str, str], screenshot: Path) -> str | None:
 
     body = config.get("MAIL_BODY", "").strip()
     if not body:
-        body = f"自动截图时间：{timestamp}\n截图文件：{screenshot.name}"
+        body = f"自动截图时间：{timestamp}"
 
-    message = EmailMessage()
+    content_id = f"screenshot_{uuid.uuid4().hex[:8]}"
+
+    html = f"""\
+<html>
+<body>
+<p>{body}</p>
+<p><img src="cid:{content_id}" style="max-width:100%" alt="UU Screenshot"></p>
+</body>
+</html>"""
+
+    message = MIMEMultipart("related")
     message["Subject"] = subject
     message["From"] = from_addr
     message["To"] = ", ".join(recipients)
-    message.set_content(body)
+    message.attach(MIMEText(html, "html"))
 
     if get_bool(config, "EMAIL_ATTACH_SCREENSHOT", True):
         maintype, subtype = guess_attachment_type(screenshot)
         with screenshot.open("rb") as file:
-            message.add_attachment(
-                file.read(),
-                maintype=maintype,
-                subtype=subtype,
-                filename=screenshot.name,
-            )
+            img = MIMEImage(file.read(), _subtype=subtype)
+            img.add_header("Content-ID", f"<{content_id}>")
+            img.add_header("Content-Disposition", "inline", filename=screenshot.name)
+            message.attach(img)
 
     security = config.get("SMTP_SECURITY", "").strip().lower()
     if not security:
