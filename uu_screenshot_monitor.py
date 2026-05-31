@@ -265,7 +265,13 @@ def activate_windows_app(config: dict[str, str]) -> None:
         logging.warning("未找到包含 '%s' 的窗口", app_name)
         return
 
-    logging.info("找到 %d 个窗口，逐个激活", len(found_hwnds))
+    HWND_TOPMOST = -1
+    SWP_NOMOVE = 0x0002
+    SWP_NOSIZE = 0x0001
+    SWP_SHOWWINDOW = 0x0040
+    TOPMOST_FLAGS = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW
+
+    logging.info("找到 %d 个窗口，逐个激活并置顶", len(found_hwnds))
 
     for hwnd in found_hwnds:
         if user32.IsIconic(hwnd):
@@ -281,6 +287,8 @@ def activate_windows_app(config: dict[str, str]) -> None:
         user32.SetForegroundWindow(hwnd)
         user32.BringWindowToTop(hwnd)
         time.sleep(0.2)
+
+        user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, TOPMOST_FLAGS)
 
     foreground = user32.GetForegroundWindow()
     if foreground not in found_hwnds:
