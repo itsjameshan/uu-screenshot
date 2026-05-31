@@ -282,6 +282,19 @@ def activate_windows_app(config: dict[str, str]) -> None:
         user32.BringWindowToTop(hwnd)
         time.sleep(0.2)
 
+    foreground = user32.GetForegroundWindow()
+    if foreground not in found_hwnds:
+        logging.info("SetForegroundWindow 未生效，使用 SwitchToThisWindow 重试")
+        for hwnd in found_hwnds:
+            user32.SwitchToThisWindow(hwnd, True)
+            time.sleep(0.3)
+
+        foreground = user32.GetForegroundWindow()
+        if foreground in found_hwnds:
+            logging.info("SwitchToThisWindow 成功激活窗口")
+        else:
+            logging.warning("窗口激活不保证成功，当前前台窗口非 UU 远程")
+
     logging.info("已激活窗口：%s", app_name)
 
 
