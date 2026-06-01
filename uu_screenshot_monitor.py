@@ -785,30 +785,69 @@ def check_trigger_email(config: dict[str, str]) -> bool:
     if not username or not password:
         raise ValueError("缺少 IMAP 凭据：SMTP_USERNAME 与授权码")
 
+    logging.debug("检查触发邮件，关键词: %s", trigger_keyword)
+
+    uid_file = Path(config.get("OUTPUT_DIR", "screenshots")) / ".last_trigger_uid"
+    last_uid = 0
+    if uid_file.exists():
+        try:
+            last_uid = int(uid_file.read_text(encoding="utf-8").strip())
+        except (ValueError, OSError):
+            last_uid = 0
+
     with imaplib.IMAP4_SSL(host, port) as imap:
+        logging.debug("IMAP 连接成功，正在登录...")
         imap.login(username, password)
+        logging.debug("IMAP 登录成功，选择 INBOX...")
         imap.select("INBOX")
 
-        status, messages = imap.search(None, "UNSEEN")
-        if status != "OK" or not messages[0]:
+        status, uid_data = imap.uid("SEARCH", None, "ALL")
+        if status != "OK" or not uid_data[0]:
+            logging.debug("收件箱为空")
             return False
 
-        for msg_id in messages[0].split():
+        all_uids_raw = uid_data[0].split()
+        all_uids = [int(uid) for uid in all_uids_raw]
+        max_uid = all_uids[-1] if all_uids else 0
+        logging.debug("收件箱共 %d 封邮件，最大 UID: %s，上次处理 UID: %s",
+                      len(all_uids), max_uid, last_uid)
+
+        if max_uid <= last_uid:
+            logging.debug("没有新邮件（max_uid=%s <= last_uid=%s）", max_uid, last_uid)
+            return False
+
+        new_uids = [uid for uid in all_uids if uid > last_uid]
+        logging.debug("新邮件 UID 列表: %s", new_uids)
+
+        triggered = False
+        max_processed_uid = max_uid
+
+        for uid in new_uids:
             try:
-                status, data = imap.fetch(msg_id, "(BODY.PEEK[HEADER.FIELDS (SUBJECT)])")
-                if status != "OK" or not data[0]:
+                status, data = imap.uid("FETCH", str(uid), "(BODY.PEEK[HEADER.FIELDS (SUBJECT)])")
+                if status != "OK":
                     continue
 
-                msg = email.message_from_bytes(data[0][1])
-                subject = str(msg.get("Subject", "")).strip().lower()
-                if trigger_keyword in subject:
-                    logging.info("收到触发邮件：%s", msg.get("Subject", ""))
-                    imap.store(msg_id, "+FLAGS", "\\Seen")
-                    return True
+                for part in data:
+                    if isinstance(part, tuple):
+                        msg = email.message_from_bytes(part[1])
+                        subject = str(msg.get("Subject", "")).strip().lower()
+                        logging.debug("UID %s 标题: %s", uid, subject)
+                        if trigger_keyword in subject:
+                            logging.info("收到触发邮件 (UID %s)：%s", uid, msg.get("Subject", ""))
+                            triggered = True
+                            break
             except Exception:
-                logging.debug("解析邮件 %s 失败", msg_id)
+                logging.debug("解析邮件 UID %s 失败", uid, exc_info=True)
 
-    return False
+            if triggered:
+                break
+
+        uid_file.parent.mkdir(parents=True, exist_ok=True)
+        uid_file.write_text(str(max_processed_uid), encoding="utf-8")
+        logging.debug("已更新 last_uid 为 %s", max_processed_uid)
+
+    return triggered
 
 
 def watch_email_loop(config: dict[str, str]) -> None:
