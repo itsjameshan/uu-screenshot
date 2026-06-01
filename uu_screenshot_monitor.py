@@ -4,13 +4,17 @@
 
 macOS 默认使用系统自带的 screencapture，不需要安装额外依赖。
 Windows/Linux 会尝试使用 Pillow 或系统截图命令。
+
+支持 --watch-email 模式：监听邮箱，收到触发邮件时截图回复。
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
+import email
 import getpass
+import imaplib
 import json
 import logging
 import mimetypes
@@ -762,6 +766,67 @@ def run_cycle(config: dict[str, str], dry_run: bool) -> bool:
     return failed == 0 or sent > 0
 
 
+def check_trigger_email(config: dict[str, str]) -> bool:
+    host = config.get("IMAP_HOST", "imap.qq.com").strip()
+    port = get_int(config, "IMAP_PORT", 993)
+    username = (
+        config.get("SMTP_USERNAME", "").strip()
+        or config.get("SMTP_USER", "").strip()
+        or config.get("MAIL_FROM", "").strip()
+    )
+    password = get_secret(
+        config,
+        "SMTP_PASSWORD",
+        default_keyring_service=smtp_keyring_identity(config)[0],
+        default_keyring_username=smtp_keyring_identity(config)[1],
+    )
+    trigger_keyword = config.get("TRIGGER_KEYWORD", "screenshot").strip().lower()
+
+    if not username or not password:
+        raise ValueError("缺少 IMAP 凭据：SMTP_USERNAME 与授权码")
+
+    with imaplib.IMAP4_SSL(host, port) as imap:
+        imap.login(username, password)
+        imap.select("INBOX")
+
+        status, messages = imap.search(None, "UNSEEN")
+        if status != "OK" or not messages[0]:
+            return False
+
+        for msg_id in messages[0].split():
+            try:
+                status, data = imap.fetch(msg_id, "(BODY.PEEK[HEADER.FIELDS (SUBJECT)])")
+                if status != "OK" or not data[0]:
+                    continue
+
+                msg = email.message_from_bytes(data[0][1])
+                subject = str(msg.get("Subject", "")).strip().lower()
+                if trigger_keyword in subject:
+                    logging.info("收到触发邮件：%s", msg.get("Subject", ""))
+                    imap.store(msg_id, "+FLAGS", "\\Seen")
+                    return True
+            except Exception:
+                logging.debug("解析邮件 %s 失败", msg_id)
+
+    return False
+
+
+def watch_email_loop(config: dict[str, str]) -> None:
+    check_interval = get_int(config, "TRIGGER_CHECK_INTERVAL", 15)
+    logging.info("监听邮箱触发，关键词 '%s'，检查间隔 %s 秒",
+                 config.get("TRIGGER_KEYWORD", "screenshot"), check_interval)
+
+    while True:
+        try:
+            if check_trigger_email(config):
+                logging.info("执行截图并发送")
+                run_cycle(config, dry_run=False)
+        except Exception:
+            logging.exception("检查触发邮件失败")
+
+        time.sleep(check_interval)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="定时截图 UU 远程界面，并通过邮件、Webhook 或短信推送提醒。",
@@ -771,6 +836,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interval", type=int, help="覆盖 INTERVAL_SECONDS，单位秒")
     parser.add_argument("--dry-run", action="store_true", help="只截图，不发送邮件/推送")
     parser.add_argument("--store-smtp-password", action="store_true", help="把 SMTP 授权码安全保存到系统凭据管理器")
+    parser.add_argument("--watch-email", action="store_true", help="监听邮箱，收到触发邮件时截图回复")
     parser.add_argument("-v", "--verbose", action="store_true", help="打印更详细日志")
     return parser.parse_args()
 
@@ -785,6 +851,10 @@ def main() -> int:
         return store_smtp_password(config)
 
     setup_logging(config, args.verbose)
+
+    if args.watch_email:
+        watch_email_loop(config)
+        return 0
 
     interval = get_int(config, "INTERVAL_SECONDS", 300)
     if interval <= 0:
